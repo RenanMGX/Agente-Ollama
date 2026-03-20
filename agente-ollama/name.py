@@ -1,0 +1,1 @@
+print("Agente Ollama é um pacote para integrar o Ollama com o LangChain.")
