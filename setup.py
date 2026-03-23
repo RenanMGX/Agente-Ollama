@@ -8,7 +8,7 @@ with open(path.join(here, 'README.md'), encoding='utf-16') as f:
 
 setup(
     name="agente-ollama",
-    version="0.1.1",
+    version="0.1.2",
     packages=find_packages(),
     install_requires=requirements,
     description="A package for integrating Ollama with LangChain.",
@@ -16,7 +16,7 @@ setup(
     long_description_content_type='text/markdown',
     author="Renan Oliveira",
     author_email="renanmgx@hotmail.com",
-    url="",
+    url="https://github.com/RenanMGX/Agente-Ollama",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
