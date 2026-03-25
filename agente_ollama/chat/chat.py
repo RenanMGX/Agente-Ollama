@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from turtle import pd
 from httpx import delete
 import ollama
 import json
@@ -23,7 +24,7 @@ from ollama._types import (
 
 from ddgs import DDGS
 
-def buscar_web(query: str, max_results: int ) -> str:
+def buscar_web(query: str, max_results: int=10 ) -> str:
     """Realiza uma busca na web usando DuckDuckGo e retorna os resultados como uma string.
     Args:
         query (str): A consulta de busca.
@@ -149,7 +150,7 @@ class Chat():
             num_predictions:int|None=None,
             think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
             date:datetime|None = None,
-            
+            remove_historic:bool=False,
             
             logprobs: Optional[bool] = None,
             top_logprobs: Optional[int] = None,
@@ -174,22 +175,33 @@ class Chat():
         
         
         _images = self.convert_images_to_base64(images_paths) if images_paths else []
-                    
-        message = deepcopy(self.historicchat)
+        
+        #create historic   
+        if remove_historic:       
+            message = []
+        else:
+            message = deepcopy(self.historicchat)
             
         #system unifique
         system_temp = [self.chat_sistem] if self.chat_sistem else []
         for msg in message:
             if msg['role'] == 'system':
-                system_temp.append(msg['content'])
+                sys_temp = msg['content'].strip().split("\n")
+                for s in sys_temp:
+                    system_temp.append(s)
                 message.remove(msg)
         
         if not system in system_temp:
             system_temp.append(system)
-                    
-        message.insert(0,{"role": "system", "content": "\n".join(system_temp)})
-        
             
+        system_temp = list(set(system_temp))
+        system_temp = [s for s in system_temp if s.strip()]
+                    
+        message.insert(0,{"role": "system", "content": ("\n".join(system_temp)).strip()})
+        
+        #import pdb;pdb.set_trace()
+         
+        
         message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': "datetime_now", 'arguments': {} }, } ] } )
         message.append({"role": "tool", "tool_name": "datetime_now", "content": _date.strftime("%Y-%m-%d %H:%M:%S")})
         
@@ -198,8 +210,6 @@ class Chat():
         role:dict = {"role": "user", "content": prompt}
         if _images:
             role['images'] = _images
-        if options:
-            role['options'] = options
         
         message.append(role)
         
@@ -230,7 +240,7 @@ class Chat():
             logprobs=logprobs,
             top_logprobs=top_logprobs,
             keep_alive=keep_alive,
-            
+            options=options if options else None,
             #tools=tools
         )
         ##########
@@ -245,8 +255,23 @@ class Chat():
         #print(f"Chat Title: {self.__title=}")
         if res.message.content:
             message.append({"role": "assistant", "content": res.message.content})
+        else:
+            raise Exception(f"{res}")
+        
+        _message = []
+        for msg in message:
+            if msg['role'] == 'tool':
+                #message.remove(msg)
+                continue
+            if 'tool_calls' in msg:
+                #message.remove(msg)
+                continue
+            #import pdb;pdb.set_trace()
+            _message.append(msg)
+                
         #print(message)
-        self.historicchat = message
+        if not remove_historic:
+            self.historicchat = _message
         
         return res
     
