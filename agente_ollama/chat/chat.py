@@ -1,4 +1,6 @@
 import os
+import re
+import sys
 from httpx import delete
 import ollama
 import json
@@ -12,37 +14,27 @@ from typing import Any, Callable, Literal, Mapping, Sequence, List, Dict, Union,
 from ..generate.generate import Generate
 from copy import deepcopy
 from pydantic.json_schema import JsonSchemaValue
+from datetime import date, datetime
 
 from ollama._types import (
-  ChatRequest,
   ChatResponse,
-  CopyRequest,
-  CreateRequest,
-  DeleteRequest,
-  EmbeddingsRequest,
-  EmbeddingsResponse,
-  EmbedRequest,
-  EmbedResponse,
-  GenerateRequest,
-  GenerateResponse,
-  Image,
-  ListResponse,
-  Message,
-  Options,
-  ProcessResponse,
-  ProgressResponse,
-  PullRequest,
-  PushRequest,
-  ResponseError,
-  ShowRequest,
-  ShowResponse,
-  StatusResponse,
   Tool,
-  WebFetchRequest,
-  WebFetchResponse,
-  WebSearchRequest,
-  WebSearchResponse,
 )
+
+from ddgs import DDGS
+
+def buscar_web(query: str, max_results: int ) -> str:
+    """Realiza uma busca na web usando DuckDuckGo e retorna os resultados como uma string.
+    Args:
+        query (str): A consulta de busca.
+        max_results (int): O número máximo de resultados a serem retornados.
+    """
+    for _ in range(3):
+        with DDGS() as ddgs:
+            resultados = list(ddgs.text(query, max_results=max_results))
+        if resultados:
+            return str(resultados)
+    return "No search results found."
 
 
 class HistoricManager():
@@ -103,37 +95,52 @@ class HistoricManager():
         self.__save({})
 
 class Chat():
-    @property
-    def model(self) -> str:
-        return self.__model
-    
-    @property
-    def title(self) -> str:
-        return self.__title
-    
-    def __init__(self, model:str, system: str = "", host: Literal["http://localhost:11434"]| str | None = None, **kwargs) -> None:      
-        self.__model = model
-        self.__historychat: List[dict] = []
-        self.__client = ollama.Client(host, **kwargs)
-        self.__system = system
-        self.__title = ""
-        self.save:bool = True
-        self.register_image_in_historic = False
+    # @property
+    # def model(self) -> str:
+    #     return self.__model
         
-        if self.__system:
-            self.__historychat.append({"role": "system", "content": system})
+    def __init__(
+        self, 
+        model:str, 
+        chat_sistem:str = "",
+        host: Literal["http://localhost:11434"]| str | None = None, 
+        **kwargs
+    ) -> None:    
+          
+        self.model = model
+        
+        self.historicchat: List[dict] = []
+        
+        self.__client = ollama.Client(host, **kwargs)
+
+        self.chat_sistem = chat_sistem
+        # if self.__system:
+        #     self.__historychat.append({"role": "system", "content": system})
             
-        self.__historic_manager = HistoricManager()
             
         
     def restart_chat(self, system: str = "") -> None:
-        self.__historychat = []
+        self.historicchat = []
         if system:
-            self.__historychat.append({"role": "system", "content": system})
+            self.historicchat.append({"role": "system", "content": system})
+            
+    @staticmethod
+    def convert_images_to_base64(images_paths: List[str]) -> List[dict]:
+        images = []
+        for image_path in images_paths:
+            path = Path(image_path)
+            if not path.is_file() or not path.exists():
+                raise ValueError(f"Image path '{image_path}' is not a valid file.")
+            if not path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
+                raise ValueError(f"Image path '{image_path}' is not a supported image format.")
+            
+            images.append(base64.b64encode(path.read_bytes()).decode("utf-8"))
+        return images
         
     def chat(self, 
             prompt: str,
-            title:str="",
+            web_search: Optional[bool],
+            system:str="",
             format:Literal['', 'json']='',
             images_paths:List[str]=[],
             temperature:float|None=None,
@@ -141,13 +148,19 @@ class Chat():
             seed:int|None=None,
             num_predictions:int|None=None,
             think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+            date:datetime|None = None,
+            
             
             logprobs: Optional[bool] = None,
             top_logprobs: Optional[int] = None,
             keep_alive: Optional[Union[float, str]] = None,
-            tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
+            #tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
             
         ) -> ChatResponse:
+        if isinstance(date, datetime):
+            _date = date
+        else:
+            _date = datetime.now()
         
         options = {}
         if temperature is not None:
@@ -160,23 +173,27 @@ class Chat():
             options['num_predictions'] = num_predictions
         
         
-        _images = []
-        if images_paths:
-            for image_path in images_paths:
-                path = Path(image_path)
-                if not path.is_file() or not path.exists():
-                    raise ValueError(f"Image path '{image_path}' is not a valid file.")
-                if not path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
-                    raise ValueError(f"Image path '{image_path}' is not a supported image format.")
-                
-                _images.append(base64.b64encode(path.read_bytes()).decode("utf-8"))
-        
-        if title:
-            historic = self.__historic_manager.get_chat(title)
-            if historic:
-                self.__historychat = historic
+        _images = self.convert_images_to_base64(images_paths) if images_paths else []
+                    
+        message = deepcopy(self.historicchat)
             
-        message = deepcopy(self.__historychat)
+        #system unifique
+        system_temp = [self.chat_sistem] if self.chat_sistem else []
+        for msg in message:
+            if msg['role'] == 'system':
+                system_temp.append(msg['content'])
+                message.remove(msg)
+        
+        if not system in system_temp:
+            system_temp.append(system)
+                    
+        message.insert(0,{"role": "system", "content": "\n".join(system_temp)})
+        
+            
+        message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': "datetime_now", 'arguments': {} }, } ] } )
+        message.append({"role": "tool", "tool_name": "datetime_now", "content": _date.strftime("%Y-%m-%d %H:%M:%S")})
+        
+            
         
         role:dict = {"role": "user", "content": prompt}
         if _images:
@@ -186,9 +203,26 @@ class Chat():
         
         message.append(role)
         
+        if web_search:
+            try:
+                #web_search
+                search = self.web_search(
+                    query=prompt
+                )
+                if search:
+                    for item in search:
+                        message.append(item)
+            except Exception as err:
+                pass
+                #print(f"Error during web search: {err}")
+                #message.append({"role": "assistant", "content": buscar_web(prompt)})
+                #message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': #"buscar_web", 'arguments': {"query": prompt} }, } ] } )
+                #message.append({"role": "tool", "tool_name": "buscar_web", "content": buscar_web(prompt)})
+        #print(f"\n\n{message=}\n\n")
+        
         ##########     CHAT
         res = self.__client.chat(
-            model=self.__model, 
+            model=self.model, 
             messages=message,
             stream=False,
             format=format,
@@ -196,61 +230,109 @@ class Chat():
             logprobs=logprobs,
             top_logprobs=top_logprobs,
             keep_alive=keep_alive,
-            tools=tools
+            
+            #tools=tools
         )
         ##########
         
-        if not title:
-            if not self.__title:
-                if self.save:
-                    self.__title = Generate(model=self.__model).generate(prompt=f"You will receive a prompt. Based on its content, you must generate a title that accurately represents the text. The title must be written in the same language as the original prompt and should be concise, avoiding excessive length.\n prompt:\n{prompt}").response
-        else:
-            self.__title = title
+        # if not title:
+        #     if not self.__title:
+        #         if self.save:
+        #             self.__title = Generate(model=self.__model).generate(prompt=f"You will receive a prompt. Based on its content, you must generate a title that accurately represents the text. The title must be written in the same language as the original prompt and should be concise, avoiding excessive length.\n prompt:\n{prompt}").response
+        # else:
+        #     self.__title = title
         
         #print(f"Chat Title: {self.__title=}")
-        message.append({"role": "assistant", "content": res.message.content})
+        if res.message.content:
+            message.append({"role": "assistant", "content": res.message.content})
         #print(message)
-        self.__historychat = message
-        if self.save:
-            if not self.register_image_in_historic:
-                for msg in self.__historychat:
-                    if "images" in msg:
-                        del msg["images"]
-            self.__historic_manager.register_chat(self.__title, self.__historychat)
-        
+        self.historicchat = message
         
         return res
     
-    def chat_tools(
+    def web_search(self, query:str) -> List:
+        tools_message = []
+        tools_message.append({"role": "system", "content": "You are a helpful assistant with access to a web search tool. When the user provides a query, you will use the 'buscar_web' tool to search the web and return relevant information."})
+        
+        tools_message.append({"role": "user", "content": query})
+        
+        tools = [buscar_web]
+        tools_map = {t.__name__: t for t in tools if callable(t)}
+        res = self.__client.chat(
+            model=self.model, 
+            messages=tools_message,
+            stream=False,
+            tools=tools,
+        )
+        ##########
+        
+        #import pdb;pdb.set_trace()
+        tools_return = []
+        if res.message.tool_calls:
+            for tool in res.message.tool_calls:
+                function = tool.function.name
+                args = tool.function.arguments
+                                        
+                # procura a função nas tools passadas, senão em globals()
+                func = tools_map.get(function) or globals().get(function)
+                if func is None:
+                    raise NameError(f"Tool function '{function}' não encontrada")
+
+                # chamar adequadamente conforme tipo de args
+                if isinstance(args, dict):
+                    result_function = func(**args)
+                elif isinstance(args, (list, tuple)):
+                    result_function = func(*args)
+                else:
+                    result_function = func(args) # type: ignore
+                
+                # tools_message.append({"role": "assistant", "content": result_function})
+                tools_return.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                'type': 'function',
+                                'function': {
+                                    'name': function,
+                                    'arguments': args
+                                },
+                            }
+                        ]
+                    }
+                )
+                
+                tools_return.append({"role": "tool", "tool_name": function, "content": result_function})
+                        
+        return tools_return
+        
+    def functions_tools(
         self, 
-        prompt:str, 
+        prompt:str,
         tools:List[Any],
         think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
-        system:Literal["<DEFAULT_SYSTEM>"]|str = ""
-    ):
+        system:str = "",
+    ) -> ChatResponse:
         tools_message = []
-        if system == "<DEFAULT_SYSTEM>":
-            if self.__system:
-                tools_message.append({"role": "system", "content": self.__system})
-        else:
-            if system:
-                tools_message.append({"role": "system", "content": system})
+        if system:
+            tools_message.append({"role": "system", "content": system})
         
         tools_message.append({"role": "user", "content": prompt})
         
         #for _ in range(len())
         ##########     CHAT
+        tools_map = {t.__name__: t for t in tools if callable(t)}
         res = self.__client.chat(
-            model=self.__model, 
+            model=self.model, 
             messages=tools_message,
             stream=False,
             think=think,
-            tools=tools
+            tools=tools,
+            
         )
         ##########
         
         #import pdb;pdb.set_trace()
-        tools_map = {t.__name__: t for t in tools if callable(t)}
         
         if res.message.tool_calls:
             for tool in res.message.tool_calls:
@@ -292,7 +374,7 @@ class Chat():
                 
                 
         res = self.__client.chat(
-            model=self.__model, 
+            model=self.model, 
             messages=tools_message,
             stream=False,
             think=think,
