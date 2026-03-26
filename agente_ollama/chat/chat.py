@@ -132,8 +132,8 @@ class Chat():
             path = Path(image_path)
             if not path.is_file() or not path.exists():
                 raise ValueError(f"Image path '{image_path}' is not a valid file.")
-            if not path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]:
-                raise ValueError(f"Image path '{image_path}' is not a supported image format.")
+            # if not path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".pdf"]:
+            #     raise ValueError(f"Image path '{image_path}' is not a supported image format.")
             
             images.append(base64.b64encode(path.read_bytes()).decode("utf-8"))
         return images
