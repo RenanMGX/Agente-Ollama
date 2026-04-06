@@ -170,10 +170,12 @@ if __name__ == "__main__":
     'Villaggio Verona',
     'Vision'
     ]
-    # docs = {x:x for x in docs}
-    # docs["lessence"] = "Edifício L'Essence"
-    # docs["lesence"] = "Edifício L'Essence"
-    # docs["Edifício Lessence"] = "Edifício L'Essence"
+    docs = {x:x for x in docs}
+    docs["lessence"] = "Edifício L'Essence"
+    docs["lesence"] = "Edifício L'Essence"
+    docs["Edifício Lessence"] = "Edifício L'Essence"
+    docs["Avignon"] = "Edifício Avignon"
+    docs["avignon"] = "Edifício Avignon"
     
     bot.generate_list_embeddings_base(docs)
     
@@ -181,12 +183,20 @@ if __name__ == "__main__":
         user_input = input("You: ")
         if user_input.lower() in [r"\exit", r"\quit", r"\e"]:
             break
+        if not user_input:
+            continue
         results = bot.search(user_input)
         print("Results:")
         try:
-            for doc, score in results[0:3]:
-                print(f"    {doc} (similarity: {score:.4f})")
-                #break
+            
+            res = results[0]
+            if res[1]<0.2:
+                print("    No good match found.")
+            else:
+                #print(f"    {res[0]} (similarity: {res[1]:.4f})")
+                for doc, score in results[0:3]:
+                    print(f"    {doc} (similarity: {score:.4f})")
+                    #break
         except Exception as err:
             import traceback; print(traceback.format_exc())
             import pdb; pdb.set_trace()

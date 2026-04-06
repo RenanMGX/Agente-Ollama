@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import zipfile
 from turtle import pd
 from httpx import delete
 import ollama
@@ -16,6 +17,7 @@ from ..generate.generate import Generate
 from copy import deepcopy
 from pydantic.json_schema import JsonSchemaValue
 from datetime import date, datetime
+from utils.utils import *
 
 from ollama._types import (
   ChatResponse,
@@ -23,6 +25,74 @@ from ollama._types import (
 )
 
 from ddgs import DDGS
+
+
+from pathlib import Path
+from ollama import chat
+from PyPDF2 import PdfReader
+from docx import Document
+import pandas as pd
+
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+def _extrair_imgs_zip(path: Path, media_dir: str) -> List[str]:
+    imgs = []
+    try:
+        with zipfile.ZipFile(str(path), 'r') as z:
+            for name in z.namelist():
+                if name.startswith(media_dir) and Path(name).suffix.lower() in _IMAGE_EXTS:
+                    try:
+                        data = z.read(name)
+                        imgs.append(base64.b64encode(data).decode("utf-8"))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return imgs
+
+
+def extrair_texto(path: str) -> tuple[str, str, List[str]]:
+    p = Path(path)
+    ext = p.suffix.lower()
+
+    if ext in {".png", ".jpg", ".jpeg", ".webp"}:
+        return "image", str(p), []
+
+    if ext in {".txt", ".md", ".py", ".json", ".xml", ".csv"}:
+        return ext, p.read_text(encoding="utf-8", errors="ignore"), []
+
+    if ext == ".pdf":
+        reader = PdfReader(str(p))
+        texto = "\n".join(page.extract_text() or "" for page in reader.pages)
+        imgs = []
+        for page in reader.pages:
+            for img in page.images:
+                try:
+                    imgs.append(base64.b64encode(img.data).decode("utf-8"))
+                except Exception:
+                    pass
+        return ".pdf", texto, imgs
+
+    if ext == ".docx":
+        try:
+            doc = Document(str(p))
+            texto = "\n".join(par.text for par in doc.paragraphs if par.text.strip())
+            imgs = _extrair_imgs_zip(p, "word/media/")
+        except Exception as e:
+            sanitized_path = sanitize_docx(p)
+            doc = Document(str(sanitized_path))
+            texto = "\n".join(par.text for par in doc.paragraphs if par.text.strip())
+            imgs = _extrair_imgs_zip(Path(sanitized_path), "word/media/")
+            os.remove(sanitized_path)
+        return ".docx", texto, imgs
+
+    if ext == ".xlsx":
+        df = pd.read_excel(p, engine="openpyxl")
+        imgs = _extrair_imgs_zip(p, "xl/media/")
+        return ".xlsx", df.to_markdown(index=False), imgs
+
+    raise ValueError(f"Tipo de arquivo não suportado: {ext}")
 
 def buscar_web(query: str, max_results: int=10 ) -> str:
     """Realiza uma busca na web usando DuckDuckGo e retorna os resultados como uma string.
@@ -140,10 +210,10 @@ class Chat():
         
     def chat(self, 
             prompt: str,
-            web_search: Optional[bool],
+            web_search: Optional[bool]=False,
             system:str="",
             format:Literal['', 'json']='',
-            images_paths:List[str]=[],
+            files_paths:List[str]=[],
             temperature:float|None=None,
             top_p:float|None=None,
             seed:int|None=None,
@@ -151,6 +221,7 @@ class Chat():
             think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
             date:datetime|None = None,
             remove_historic:bool=False,
+            remove_date:bool=False,
             
             logprobs: Optional[bool] = None,
             top_logprobs: Optional[int] = None,
@@ -174,7 +245,7 @@ class Chat():
             options['num_predictions'] = num_predictions
         
         
-        _images = self.convert_images_to_base64(images_paths) if images_paths else []
+        #_images = self.convert_images_to_base64(images_paths) if images_paths else []
         
         #create historic   
         if remove_historic:       
@@ -201,15 +272,30 @@ class Chat():
         
         #import pdb;pdb.set_trace()
          
-        
-        message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': "datetime_now", 'arguments': {} }, } ] } )
-        message.append({"role": "tool", "tool_name": "datetime_now", "content": _date.strftime("%Y-%m-%d %H:%M:%S")})
+        if not remove_date:
+            message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': "datetime_now", 'arguments': {} }, } ] } )
+            message.append({"role": "tool", "tool_name": "datetime_now", "content": _date.strftime("%Y-%m-%d %H:%M:%S")})
         
             
         
+        
+        _images = []
+        texts = ""
+        for file_path in files_paths:
+            _type, content, embedded_imgs = extrair_texto(file_path)
+            if _type == "image":
+                _images.append(content)
+            else:
+                texts += f"'{_type}':\n{content}\n\n"
+            _images.extend(embedded_imgs)
+        
+        if texts:
+            prompt = f"{prompt}\n\nfiles:\n{texts}"
+        
         role:dict = {"role": "user", "content": prompt}
+        
         if _images:
-            role['images'] = _images
+           role['images'] = _images
         
         message.append(role)
         
@@ -224,11 +310,8 @@ class Chat():
                         message.append(item)
             except Exception as err:
                 pass
-                #print(f"Error during web search: {err}")
-                #message.append({"role": "assistant", "content": buscar_web(prompt)})
-                #message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': #"buscar_web", 'arguments': {"query": prompt} }, } ] } )
-                #message.append({"role": "tool", "tool_name": "buscar_web", "content": buscar_web(prompt)})
-        #print(f"\n\n{message=}\n\n")
+            
+        print(f"\n\n{message=}\n\n")
         
         ##########     CHAT
         res = self.__client.chat(
@@ -245,14 +328,6 @@ class Chat():
         )
         ##########
         
-        # if not title:
-        #     if not self.__title:
-        #         if self.save:
-        #             self.__title = Generate(model=self.__model).generate(prompt=f"You will receive a prompt. Based on its content, you must generate a title that accurately represents the text. The title must be written in the same language as the original prompt and should be concise, avoiding excessive length.\n prompt:\n{prompt}").response
-        # else:
-        #     self.__title = title
-        
-        #print(f"Chat Title: {self.__title=}")
         if res.message.content:
             message.append({"role": "assistant", "content": res.message.content})
         else:
