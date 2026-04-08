@@ -1,6 +1,8 @@
+import math
 import os
 import re
 import sys
+import tempfile
 import zipfile
 from turtle import pd
 from httpx import delete
@@ -22,7 +24,11 @@ from utils.utils import *
 from ollama._types import (
   ChatResponse,
   Tool,
+  ResponseError,
 )
+
+import logging
+logging.getLogger("PyPDF2").setLevel(logging.ERROR)
 
 from ddgs import DDGS
 
@@ -52,6 +58,37 @@ def _extrair_imgs_zip(path: Path, media_dir: str) -> List[str]:
     return imgs
 
 
+def pdf_to_images(path: str | Path, dpi: int = 300) -> list[str]:
+    """Converte cada página de um PDF em imagem PNG temporária.
+    Requer PyMuPDF: pip install pymupdf
+    Retorna lista de caminhos dos arquivos temporários criados.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise ImportError(
+            "PyMuPDF não está instalado. Execute: pip install pymupdf"
+        ) from None
+
+    p = Path(path)
+    doc = fitz.open(str(p))
+    tmp_files: list[str] = []
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    try:
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)  # type: ignore[union-attr]
+            tmp = tempfile.NamedTemporaryFile(
+                delete=False, suffix=".png", prefix="ollama_pdf_page_"
+            )
+            tmp_name = tmp.name
+            tmp.close()  # Fecha antes de salvar (necessário no Windows — lock exclusivo)
+            pix.save(tmp_name)
+            tmp_files.append(tmp_name)
+    finally:
+        doc.close()
+    return tmp_files
+
+
 def extrair_texto(path: str) -> tuple[str, str, List[str]]:
     p = Path(path)
     ext = p.suffix.lower()
@@ -64,10 +101,20 @@ def extrair_texto(path: str) -> tuple[str, str, List[str]]:
 
     if ext == ".pdf":
         reader = PdfReader(str(p))
-        texto = "\n".join(page.extract_text() or "" for page in reader.pages)
+        partes = []
+        for page in reader.pages:
+            try:
+                partes.append(page.extract_text() or "")
+            except Exception:
+                partes.append("")
+        texto = "\n".join(partes)
         imgs = []
         for page in reader.pages:
-            for img in page.images:
+            try:
+                page_images = page.images
+            except Exception:
+                continue
+            for img in page_images:
                 try:
                     imgs.append(base64.b64encode(img.data).decode("utf-8"))
                 except Exception:
@@ -93,6 +140,20 @@ def extrair_texto(path: str) -> tuple[str, str, List[str]]:
         return ".xlsx", df.to_markdown(index=False), imgs
 
     raise ValueError(f"Tipo de arquivo não suportado: {ext}")
+
+def _resize_image_file(path: str, max_px: int = 1600) -> None:
+    """Redimensiona a imagem no arquivo `path` para que nenhuma dimensão exceda `max_px`.
+    Salva em JPEG para reduzir ainda mais o tamanho. O arquivo original é substituído."""
+    from PIL import Image
+    img = Image.open(path)
+    w, h = img.size
+    if w <= max_px and h <= max_px:
+        return
+    scale = max_px / max(w, h)
+    new_size = (int(w * scale), int(h * scale))
+    img = img.resize(new_size, Image.LANCZOS) #type: ignore
+    img.save(path, format="PNG", optimize=True)
+
 
 def buscar_web(query: str, max_results: int=10 ) -> str:
     """Realiza uma busca na web usando DuckDuckGo e retorna os resultados como uma string.
@@ -183,6 +244,7 @@ class Chat():
         self.historicchat: List[dict] = []
         
         self.__client = ollama.Client(host, **kwargs)
+        self.__context_size_cache: dict[str, int | None] = {}
 
         self.chat_sistem = chat_sistem
         # if self.__system:
@@ -194,7 +256,73 @@ class Chat():
         self.historicchat = []
         if system:
             self.historicchat.append({"role": "system", "content": system})
-            
+
+    def _get_context_size(self) -> int | None:
+        if self.model in self.__context_size_cache:
+            return self.__context_size_cache[self.model]
+        try:
+            info = self.__client.show(self.model)
+            ctx = None
+
+            # Prioridade 1: num_ctx em parameters (ex: "num_ctx 32768")
+            parameters = getattr(info, "parameters", None) or ""
+            for line in parameters.splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[0].lower() == "num_ctx":
+                    try:
+                        ctx = int(parts[1])
+                    except ValueError:
+                        pass
+                    break
+
+            # Prioridade 2: PARAMETER num_ctx no modelfile completo
+            if ctx is None:
+                modelfile = getattr(info, "modelfile", None) or ""
+                for line in modelfile.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) == 3 and parts[0].upper() == "PARAMETER" and parts[1].lower() == "num_ctx":
+                        try:
+                            ctx = int(parts[2])
+                        except ValueError:
+                            pass
+                        break
+
+            # Prioridade 3: context_length nos metadados GGUF
+            if ctx is None:
+                modelinfo = getattr(info, "modelinfo", None) or {}
+                raw = next(
+                    (v for k, v in modelinfo.items() if k.endswith(".context_length")),
+                    None,
+                )
+                if raw is not None:
+                    try:
+                        ctx = int(raw)
+                    except (ValueError, TypeError):
+                        pass
+
+            logging.getLogger(__name__).debug(
+                f"[context_size] model='{self.model}' ctx_size={ctx}"
+            )
+            self.__context_size_cache[self.model] = ctx
+            return ctx
+        except Exception as e:
+            logging.getLogger(__name__).debug(
+                f"[context_size] model='{self.model}' show() falhou: {e} — verificação ignorada"
+            )
+            self.__context_size_cache[self.model] = None
+            return None
+
+    @staticmethod
+    def _estimate_tokens(messages: list) -> int:
+        total = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total += len(content) // 4
+            images = msg.get("images", [])
+            total += len(images) * 85
+        return total
+
     @staticmethod
     def convert_images_to_base64(images_paths: List[str]) -> List[dict]:
         images = []
@@ -226,6 +354,11 @@ class Chat():
             logprobs: Optional[bool] = None,
             top_logprobs: Optional[int] = None,
             keep_alive: Optional[Union[float, str]] = None,
+            truncate_on_overflow: bool = True,
+            pdf_images: bool = False,
+            pdf_as_images: bool = False,
+            pdf_dpi: int = 300,
+            debug_print_messages: bool = False,
             #tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
             
         ) -> ChatResponse:
@@ -273,32 +406,103 @@ class Chat():
         #import pdb;pdb.set_trace()
          
         if not remove_date:
-            message.append({ "role": "assistant", "tool_calls": [ { 'type': 'function', 'function': { 'name': "datetime_now", 'arguments': {} }, } ] } )
-            message.append({"role": "tool", "tool_name": "datetime_now", "content": _date.strftime("%Y-%m-%d %H:%M:%S")})
+            date_str = _date.strftime("%Y-%m-%d %H:%M:%S")
+            sys_content = message[0]['content'] if message and message[0]['role'] == 'system' else ""
+            date_line = f"Data/hora atual: {date_str}"
+            if message and message[0]['role'] == 'system':
+                message[0]['content'] = (sys_content + "\n" + date_line).strip() if sys_content else date_line
+            else:
+                message.insert(0, {"role": "system", "content": date_line})
         
             
         
         
         _images = []
+        _temp_img_files: list[str] = []
         texts = ""
         for file_path in files_paths:
+            if pdf_as_images and Path(file_path).suffix.lower() == ".pdf":
+                try:
+                    page_imgs = pdf_to_images(file_path, dpi=pdf_dpi)
+                    for img_path in page_imgs:
+                        try:
+                            _resize_image_file(img_path)
+                        except Exception as resize_err:
+                            logging.getLogger(__name__).debug(
+                                f"[resize] falha ao redimensionar '{img_path}': {resize_err}"
+                            )
+                    _temp_img_files.extend(page_imgs)
+                    _images.extend(page_imgs)
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        f"[pdf_as_images] falha ao converter '{file_path}': {e}"
+                    )
+                continue
+
             _type, content, embedded_imgs = extrair_texto(file_path)
             if _type == "image":
                 _images.append(content)
             else:
                 texts += f"'{_type}':\n{content}\n\n"
-            _images.extend(embedded_imgs)
-        
+            if pdf_images and _type == ".pdf":
+                for img_b64 in embedded_imgs:
+                    try:
+                        img_data = base64.b64decode(img_b64)
+                        tmp = tempfile.NamedTemporaryFile(
+                            delete=False, suffix=".png", prefix="ollama_pdf_img_"
+                        )
+                        tmp.write(img_data)
+                        tmp.close()
+                        _images.append(tmp.name)
+                        _temp_img_files.append(tmp.name)
+                    except Exception:
+                        pass
+            elif _type != ".pdf":
+                _images.extend(embedded_imgs)
+
+        original_prompt = prompt
         if texts:
             prompt = f"{prompt}\n\nfiles:\n{texts}"
-        
+
         role:dict = {"role": "user", "content": prompt}
-        
+
         if _images:
-           role['images'] = _images
-        
+           role['images'] = _images[:8]
+
         message.append(role)
-        
+
+        # Verificação de tokens
+        _RESPONSE_RESERVE = 512
+        ctx_size = self._get_context_size()
+        if ctx_size is not None:
+            limit = ctx_size - _RESPONSE_RESERVE
+            estimated = self._estimate_tokens(message)
+            if estimated > limit:
+                if not truncate_on_overflow:
+                    raise ValueError(
+                        f"Tokens estimados ({estimated}) excedem o limite do modelo "
+                        f"'{self.model}' ({ctx_size} tokens, reserva de {_RESPONSE_RESERVE})."
+                    )
+                # Truncar texts progressivamente
+                if texts:
+                    _block = 1000
+                    while texts and self._estimate_tokens(message) > limit:
+                        texts = texts[:-_block]
+                        new_prompt = f"{original_prompt}\n\nfiles:\n{texts}" if texts else original_prompt
+                        role["content"] = new_prompt
+
+            # Define num_ctx dinamicamente com o mínimo necessário para evitar
+            # alocação desnecessária de memória no servidor Ollama
+            estimated_final = self._estimate_tokens(message)
+            optimal_ctx = min(estimated_final + _RESPONSE_RESERVE, ctx_size)
+            # Arredonda para próxima potência de 2 para melhor alinhamento de memória
+            optimal_ctx = 2 ** math.ceil(math.log2(max(optimal_ctx, 512)))
+            optimal_ctx = min(optimal_ctx, ctx_size)
+            options['num_ctx'] = optimal_ctx
+            logging.getLogger(__name__).debug(
+                f"[num_ctx] estimated={estimated_final} → num_ctx={optimal_ctx} (max={ctx_size})"
+            )
+
         if web_search:
             try:
                 #web_search
@@ -311,21 +515,70 @@ class Chat():
             except Exception as err:
                 pass
             
-        print(f"\n\n{message=}\n\n")
-        
+        #print(f"\n\n{message=}\n\n")
+
+        if debug_print_messages:
+            import pprint
+            print("\n===== DEBUG: messages enviadas ao LLM =====")
+            pprint.pprint(message)
+            print("=========================================\n")
+
+        def _do_chat(msgs: list, opts: dict) -> ChatResponse:
+            return self.__client.chat(
+                model=self.model,
+                messages=msgs,
+                stream=False,
+                format=format,
+                think=think,
+                logprobs=logprobs,
+                top_logprobs=top_logprobs,
+                keep_alive=keep_alive,
+                options=opts if opts else None,
+            )
+
         ##########     CHAT
-        res = self.__client.chat(
-            model=self.model, 
-            messages=message,
-            stream=False,
-            format=format,
-            think=think,
-            logprobs=logprobs,
-            top_logprobs=top_logprobs,
-            keep_alive=keep_alive,
-            options=options if options else None,
-            #tools=tools
-        )
+        try:
+            try:
+                res = _do_chat(message, options)
+            except ResponseError as e:
+                if e.status_code == 400 and "length limit exceeded" in e.error:
+                    # Request body muito grande — reduz imagens pela metade e tenta novamente
+                    logging.getLogger(__name__).debug(
+                        f"[chat] 400 length limit exceeded, reduzindo imagens para '{self.model}'"
+                    )
+                    for msg in message:
+                        imgs = msg.get("images")
+                        if imgs:
+                            msg["images"] = imgs[: max(1, len(imgs) // 2)]
+                    res = _do_chat(message, options)
+                elif (
+                    e.status_code == 500
+                    and "model failed to load" not in e.error
+                    and "system memory" not in e.error
+                    and any(msg.get("images") for msg in message)
+                ):
+                    # Retry sem imagens — imagens embutidas podem travar o model runner
+                    logging.getLogger(__name__).debug(
+                        f"[chat] 500 com imagens, retentando sem imagens para '{self.model}'"
+                    )
+                    for msg in message:
+                        msg.pop("images", None)
+                    # Recalcula num_ctx sem o peso das imagens
+                    if ctx_size is not None:
+                        estimated_retry = self._estimate_tokens(message)
+                        optimal_retry = min(estimated_retry + _RESPONSE_RESERVE, ctx_size)
+                        optimal_retry = 2 ** math.ceil(math.log2(max(optimal_retry, 512)))
+                        optimal_retry = min(optimal_retry, ctx_size)
+                        options['num_ctx'] = optimal_retry
+                    res = _do_chat(message, options)
+                else:
+                    raise
+        finally:
+            for _tmp in _temp_img_files:
+                try:
+                    os.remove(_tmp)
+                except Exception:
+                    pass
         ##########
         
         if res.message.content:
@@ -482,7 +735,7 @@ class Chat():
         
         tools_message.append({"role": "assistant", "content": res.message.content})
         
-        print(f"\n\n{tools_message}\n\n")
+        #print(f"\n\n{tools_message}\n\n")
         return res
         
         
