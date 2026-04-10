@@ -1,3 +1,19 @@
+"""
+Módulo de chat e utilitários relacionados.
+
+Fornece:
+- funções para extrair texto/imagens de arquivos (`extrair_texto`, `pdf_to_images`),
+- integração com DuckDuckGo (`buscar_web`),
+- `HistoricManager` para persistir conversas locais, e
+- `Chat`, wrapper para interagir com modelos Ollama com suporte a RAG,
+    imagens e ferramentas (functions/tools).
+
+Observações:
+- O arquivo contém um import suspeito `from turtle import pd` — isso parece ser
+    um erro/typo (possivelmente pretendia importar `pandas as pd`). Não alterei
+    a lógica; apenas documentei o ponto.
+"""
+
 import math
 import os
 import re
@@ -172,6 +188,19 @@ def buscar_web(query: str, max_results: int=10 ) -> str:
 
 
 class HistoricManager():
+    """Gerencia histórico de conversas salvo em disco.
+
+    O histórico é mantido em um arquivo JSON com título → lista de mensagens.
+    Exemplo de uso::
+
+        hm = HistoricManager()
+        hm.register_chat('minha_conversa', [{'role':'user','content':'Olá'}])
+        print(hm.list_chats())
+        chat = hm.get_chat('minha_conversa')
+
+    O construtor aceita um caminho para o arquivo JSON ou para um diretório
+    (neste caso, cria `chat.json` dentro do diretório).
+    """
     @property
     def data(self) -> Dict[str, Any]:
         return self.__data
@@ -229,6 +258,23 @@ class HistoricManager():
         self.__save({})
 
 class Chat():
+    """Wrapper de alto nível para conversar com modelos via Ollama.
+
+    A classe encapsula lógica para:
+    - gerenciar histórico (`historicchat`),
+    - detectar contexto/token limits do modelo e ajustar `num_ctx`,
+    - incluir arquivos (texto, pdf, docx, xlsx) e imagens, e
+    - injetar contexto RAG obtido de índices gerados por :class:`RagIndex`.
+
+    Exemplo mínimo::
+
+        chat = Chat(model='meu-modelo')
+        resp = chat.chat('Olá')
+
+    Observações:
+    - Muitos parâmetros avançados existem no método `chat()` (temperature, think,
+      rag_paths, etc.). Consulte a docstring desse método para detalhes.
+    """
     # @property
     # def model(self) -> str:
     #     return self.__model

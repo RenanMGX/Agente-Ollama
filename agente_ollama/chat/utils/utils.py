@@ -1,6 +1,36 @@
+"""
+Utilitários auxiliares para processamento de documentos usados pelo pacote
+`agente_ollama.chat`.
+
+Atualmente contém:
+- sanitize_docx: remove atributos problemáticos de arquivos `.docx`
+  (por exemplo, atributos longos `o:gfxdata`) reempacotando o documento.
+"""
+
 import zipfile, tempfile, shutil, os, re, pathlib
 
+
 def sanitize_docx(path, out_path=None):
+    """Sanitiza um arquivo .docx removendo atributos binários muito longos.
+
+    Muitos arquivos `.docx` podem conter atributos XML com dados binários
+    (ex: `o:gfxdata`) que atrapalham bibliotecas de parsing. Esta função:
+
+    1. Extrai o `.docx` (zip) para uma pasta temporária;
+    2. Remove atributos com padrões `*gfxdata="..."` do XML `word/document.xml`;
+    3. Reempacota o conteúdo em um novo `.docx` (`out_path`).
+
+    Args:
+        path (str | Path): caminho para o `.docx` original.
+        out_path (str | Path, optional): caminho de saída. Por padrão, usa o
+            mesmo nome com sufixo `_sanitized`.
+
+    Returns:
+        str | Path: caminho para o arquivo `.docx` sanitizado.
+
+    Raises:
+        FileNotFoundError: se o arquivo ou o `word/document.xml` não forem encontrados.
+    """
     p = pathlib.Path(path)
     if not p.exists():
         raise FileNotFoundError(path)

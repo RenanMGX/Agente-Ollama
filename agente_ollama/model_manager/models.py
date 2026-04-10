@@ -1,14 +1,33 @@
+"""
+Gerenciamento de modelos detectados no servidor Ollama.
+
+Esta classe consulta `ollama.list()` e armazena capacidades por modelo, além
+de fornecer propriedades convenientes para acessar modelos para diferentes
+capabilities (completion, embedding, thinking, tools, vision).
+"""
+
 import os
 import ollama
 
 from typing import Literal, Dict, List
 from dotenv import load_dotenv; load_dotenv()
 
+
 class Models:
+    """Classe que representa os modelos disponíveis e facilita seleção.
+
+    Atributos:
+        list_models (dict): cache global mapeando model_name -> lista de capacidades.
+    """
     list_models: Dict[str, List[str]] = {}
     
     @property
     def completion(self):
+        """Modelo padrão para geração de texto (completion).
+
+        Raises:
+            ValueError: se não houver modelo configurado.
+        """
         if self.__completion:
             return self.__completion
         raise ValueError("COMPLETION_MODEL is not set.")
@@ -22,6 +41,7 @@ class Models:
         
     @property
     def tools(self):
+        """Modelo configurado para execução de tools (ferramentas)."""
         if self.__tools:
             return self.__tools
         raise ValueError("TOOLS_MODEL is not set.")
@@ -35,6 +55,7 @@ class Models:
         
     @property
     def thinking(self):
+        """Modelo usado para operações de 'thinking' (pensive internal tokens)."""
         if self.__thinking:
             return self.__thinking
         raise ValueError("THINKING_MODEL is not set.")
@@ -48,6 +69,7 @@ class Models:
         
     @property
     def vision(self):
+        """Modelo com capacidade de visão (processamento de imagens)."""
         if self.__vision:
             return self.__vision
         raise ValueError("VISION_MODEL is not set.")
@@ -61,6 +83,7 @@ class Models:
         
     @property
     def embedding(self):
+        """Modelo usado para gerar embeddings."""
         if self.__embedding:
             return self.__embedding
         raise ValueError("EMBEDDING_MODEL is not set.")
@@ -75,6 +98,7 @@ class Models:
     
     @staticmethod
     def model_exists(model_name:str) -> bool:
+        """Retorna True se o modelo estiver presente no cache `list_models`."""
         if model_name in Models.list_models:
             return True
         return False
@@ -85,6 +109,11 @@ class Models:
         *, 
         capability:Literal["completion", "tools", "thinking", "vision", "embedding"]
     ) -> bool:
+        """Verifica se um modelo possui determinada capability.
+
+        Raises:
+            ValueError: se o modelo não existir.
+        """
         if Models.model_exists(model_name):
             if capability in Models.list_models[model_name]:
                 return True
@@ -93,6 +122,11 @@ class Models:
         return False
             
     def __completetion_capability(self, model_name:str):
+        """Auxiliar para preencher propriedades derivadas automaticamente.
+
+        Se um modelo suportar múltiplas capabilities, preenche as propriedades
+        internas correspondentes apenas se estiverem vazias.
+        """
         if self.check_model_capability(model_name, capability='completion'):
             if not self.__completion:
                 self.__completion = model_name
@@ -120,6 +154,10 @@ class Models:
         return f"Models(completion='{self.__completion}', tools='{self.__tools}', thinking='{self.__thinking}', vision='{self.__vision}', embedding='{self.__embedding}')"
     
     def __init__(self):
+        """Inicializa a cache de modelos consultando o servidor Ollama.
+
+        Lê variáveis de ambiente para preencher modelos padrão quando presentes.
+        """
         self.get_all_models(force_update=True)
         
         self.__completion = ""
@@ -140,6 +178,14 @@ class Models:
             self.embedding = model
                 
     def get_all_models(self, *, force_update:bool=False) -> Dict[str, List[str]]:
+        """Consulta o servidor Ollama e preenche `Models.list_models`.
+
+        Args:
+            force_update (bool): força recarregar mesmo se já houver cache.
+
+        Returns:
+            dict: mapeamento model_name -> lista de capabilities.
+        """
         if force_update or not Models.list_models:
             for model in ollama.list().models:
                 model_name = str(model.model)

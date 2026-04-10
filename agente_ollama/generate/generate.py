@@ -1,3 +1,11 @@
+"""
+Wrapper leve em torno de `ollama.Client` para chamadas de generate com
+um modelo padrão pré-configurado.
+
+Use esta classe quando quiser fixar o modelo padrão e evitar passar o
+parâmetro `model` em todas as chamadas `generate()`.
+"""
+
 from collections.abc import Iterator
 from typing import Any, Literal, Mapping, Sequence
 
@@ -10,7 +18,14 @@ from ollama._types import (
   Image,
 )
 
+
 class Generate(ollama.Client):
+    """Cliente wrapper para geração com modelo padrão.
+
+    Args:
+        model (str): modelo default usado nas chamadas `generate()`.
+        host (str | None): host do servidor Ollama.
+    """
     @property
     def model(self) -> str:
         return self.__model
@@ -21,6 +36,11 @@ class Generate(ollama.Client):
         super().__init__(host, **kwargs)
         
     def generate(self, prompt: str, model:str|None=None, suffix: str | None = None, *, system: str | None = None, template: str | None = None, context: Sequence[int] | None = None, think: bool | None = None, logprobs: bool | None = None, top_logprobs: int | None = None, raw: bool | None = None, format: dict[str, Any] | None | Literal[''] | Literal['json'] = None, images: Sequence[str | bytes | Image] | None = None, options: Mapping[str, Any] | ollama.Options | None = None, keep_alive: float | str | None = None) -> ollama.GenerateResponse:#type: ignore
+        """Chama `ollama.Client.generate` usando `self.__model` por padrão.
+
+        Todos os parâmetros são passados para a implementação base de
+        `ollama.Client.generate`. Se `model` for None, usa `self.__model`.
+        """
         return super().generate(
             model=self.__model if model is None else model, #type: ignore
             prompt=prompt, 

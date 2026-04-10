@@ -1,10 +1,32 @@
+"""
+Instalação do pacote "agente-ollama".
+
+Este arquivo `setup.py` é o empacotador do projeto e é usado apenas para
+distribuição/instalação via setuptools. Ele lê as dependências e o
+long_description a partir de `README.md`.
+
+Observação importante:
+- O projeto atual lê `README.md` com encoding 'utf-16' por compatibilidade
+  histórica com este repositório. Caso encontre erros ao executar o
+  setup, verifique o encoding do arquivo `README.md` (recomenda-se UTF-8).
+
+Nota: este arquivo NÃO deve ser modificado para alterar comportamento do
+pacote em runtime — apenas descreve metadados para instalação.
+"""
+
 from os import path
 from setuptools import setup, find_packages
 
+# Caminho absoluto para o diretório do projeto
 here = path.abspath(path.dirname(__file__))
 
+# Leitura simples das dependências a partir do README. O README pode
+# conter linhas comentadas com '#' que serão ignoradas aqui.
 with open(path.join(here, 'README.md'), encoding='utf-16') as f:
-    requirements = [line for line in f.read().splitlines() if not line.startswith('#') and line.strip()]
+    requirements = [
+        line for line in f.read().splitlines()
+        if not line.startswith('#') and line.strip()
+    ]
 
 setup(
     name="agente-ollama",
