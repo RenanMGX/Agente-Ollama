@@ -39,6 +39,8 @@ from PyPDF2 import PdfReader
 from docx import Document
 import pandas as pd
 
+from ..rag.rag import RagIndex
+
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
@@ -336,6 +338,39 @@ class Chat():
             images.append(base64.b64encode(path.read_bytes()).decode("utf-8"))
         return images
         
+    def build_rag(
+        self,
+        files_paths: List[str],
+        save_path: str,
+        embedding_model: str,
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        format: Literal['json', 'npz'] = 'json',
+    ) -> RagIndex:
+        """Constrói e salva um índice RAG a partir de arquivos.
+
+        Args:
+            files_paths: Arquivos de origem (txt, md, pdf, docx, xlsx, etc.).
+            save_path: Caminho de destino do arquivo gerado (ex: ``'meu_rag.json'``).
+            embedding_model: Modelo de embedding Ollama (ex: ``'nomic-embed-text'``).
+            chunk_size: Tamanho máximo de cada chunk em caracteres.
+            chunk_overlap: Sobreposição em caracteres entre chunks consecutivos.
+            format: Formato do arquivo — ``'json'`` ou ``'npz'``.
+
+        Returns:
+            :class:`~agente_ollama.rag.rag.RagIndex` carregado em memória.
+        """
+        host = getattr(self.__client, '_host', None) or getattr(self.__client, 'host', None)
+        return RagIndex.build(
+            files_paths=files_paths,
+            save_path=save_path,
+            embedding_model=embedding_model,
+            host=host,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            format=format,
+        )
+
     def chat(self, 
             prompt: str,
             web_search: Optional[bool]=False,
@@ -348,8 +383,8 @@ class Chat():
             num_predictions:int|None=None,
             think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
             date:datetime|None = None,
-            remove_historic:bool=False,
-            remove_date:bool=False,
+            remove_historic:bool=True,
+            remove_date:bool=True,
             
             logprobs: Optional[bool] = None,
             top_logprobs: Optional[int] = None,
@@ -359,6 +394,9 @@ class Chat():
             pdf_as_images: bool = False,
             pdf_dpi: int = 300,
             debug_print_messages: bool = False,
+            rag_paths: List[str] = [],
+            rag_embedding_model: str = "",
+            rag_top_k: int = 5,
             #tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
             
         ) -> ChatResponse:
@@ -459,6 +497,39 @@ class Chat():
                         pass
             elif _type != ".pdf":
                 _images.extend(embedded_imgs)
+
+        # RAG: buscar chunks relevantes e injetar no system
+        if rag_paths:
+            rag_chunks: List[str] = []
+            _rag_emb_model = rag_embedding_model
+            for rag_path in rag_paths:
+                try:
+                    _idx = RagIndex.load(rag_path)
+                    _emb_model = _rag_emb_model or _idx._model
+                    _host = getattr(self.__client, '_host', None) or getattr(self.__client, 'host', None)
+                    results = _idx.search(
+                        query=prompt,
+                        embedding_model=_emb_model,
+                        top_k=rag_top_k,
+                        host=_host,
+                    )
+                    rag_chunks.extend(results)
+                except Exception as _rag_err:
+                    logging.getLogger(__name__).warning(
+                        f"[RAG] falha ao usar índice '{rag_path}': {_rag_err}"
+                    )
+            if rag_chunks:
+                rag_context = (
+                    "Use as informações abaixo para responder ao usuário. "
+                    "Não mencione que recebeu contexto externo, arquivos ou base de conhecimento — "
+                    "utilize as informações de forma natural e transparente.\n\n"
+                    + "\n---\n".join(rag_chunks)
+                )
+                sys_msg = message[0] if message and message[0]['role'] == 'system' else None
+                if sys_msg:
+                    sys_msg['content'] = (sys_msg['content'] + "\n" + rag_context).strip()
+                else:
+                    message.insert(0, {"role": "system", "content": rag_context})
 
         original_prompt = prompt
         if texts:
